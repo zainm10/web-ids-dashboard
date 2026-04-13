@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import json
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file
 import pandas as pd
 
@@ -11,7 +12,7 @@ DB_FILE = "database.db"
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5MB
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 app.secret_key = "coursework-prototype-secret"
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -27,7 +28,8 @@ def init_db():
             alert_type TEXT NOT NULL,
             severity TEXT NOT NULL,
             src_ip TEXT,
-            details TEXT NOT NULL
+            details TEXT NOT NULL,
+            risk_score INTEGER
         )
     """)
     conn.commit()
@@ -40,10 +42,16 @@ def save_alerts(alerts, log_filename: str):
     cur = conn.cursor()
     for a in alerts:
         cur.execute("""
-            INSERT INTO alerts (created_at, log_filename, alert_type, severity, src_ip, details)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO alerts (created_at, log_filename, alert_type, severity, src_ip, details, risk_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
-            a["timestamp"], log_filename, a["type"], a["severity"], a.get("ip"), a["details"]
+            a["timestamp"],
+            log_filename,
+            a["type"],
+            a["severity"],
+            a.get("ip"),
+            a["details"],
+            a.get("score", 0)
         ))
     conn.commit()
     conn.close()
@@ -52,7 +60,7 @@ def fetch_alerts():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("""
-        SELECT id, created_at, log_filename, alert_type, severity, src_ip, details
+        SELECT id, created_at, log_filename, alert_type, severity, src_ip, details, risk_score
         FROM alerts
         ORDER BY id DESC
     """)
@@ -82,7 +90,13 @@ def index():
         alerts, stats = detect_intrusions_from_lines(lines)
         save_alerts(alerts, fname)
 
-        return render_template("dashboard.html", app_name=APP_NAME, filename=fname, alerts=alerts, stats=stats)
+        return render_template(
+            "dashboard.html",
+            app_name=APP_NAME,
+            filename=fname,
+            alerts=alerts,
+            stats=stats
+        )
 
     return render_template("index.html", app_name=APP_NAME)
 
@@ -94,9 +108,33 @@ def history():
 @app.route("/download")
 def download():
     rows = fetch_alerts()
-    df = pd.DataFrame(rows, columns=["id","created_at","log_filename","alert_type","severity","src_ip","details"])
+    df = pd.DataFrame(rows, columns=[
+        "id", "created_at", "log_filename", "alert_type", "severity", "src_ip", "details", "risk_score"
+    ])
     out_path = "alerts_report.csv"
     df.to_csv(out_path, index=False)
+    return send_file(out_path, as_attachment=True)
+
+@app.route("/download-json")
+def download_json():
+    rows = fetch_alerts()
+    alerts = []
+    for r in rows:
+        alerts.append({
+            "id": r[0],
+            "created_at": r[1],
+            "log_filename": r[2],
+            "alert_type": r[3],
+            "severity": r[4],
+            "src_ip": r[5],
+            "details": r[6],
+            "risk_score": r[7]
+        })
+
+    out_path = "alerts_report.json"
+    with open(out_path, "w") as f:
+        json.dump(alerts, f, indent=4)
+
     return send_file(out_path, as_attachment=True)
 
 if __name__ == "__main__":
