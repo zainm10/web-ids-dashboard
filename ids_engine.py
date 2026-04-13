@@ -12,15 +12,23 @@ PRIVATE_IP_PREFIXES = (
 def _now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+def classify_severity(score):
+    if score >= 8:
+        return "High"
+    elif score >= 4:
+        return "Medium"
+    return "Low"
+
+def calculate_risk_score(failed_count=0, unknown_ip=False, restricted=False):
+    score = 0
+    score += failed_count * 2
+    if unknown_ip:
+        score += 5
+    if restricted:
+        score += 3
+    return score
+
 def detect_intrusions_from_lines(lines):
-    """
-    Simplified, rule-based IDS engine (prototype).
-    Rules:
-      1) Brute force: 5+ failed logins from same IP -> High
-      2) Unknown IP: successful login from non-private IP -> Medium
-      3) Restricted access keywords -> Medium
-    Returns: (alerts, stats)
-    """
     alerts = []
     stats = {
         "total_lines": len(lines),
@@ -28,54 +36,79 @@ def detect_intrusions_from_lines(lines):
         "successful_login_events": 0,
         "restricted_events": 0,
         "alerts_generated": 0,
+        "risk_score": 0
     }
 
     failed_counts = {}
-    FAILED_THRESHOLD = 5
+    failed_threshold = 5
+    unknown_ip_found = False
+    restricted_found = False
 
     for raw in lines:
         line = raw.strip()
         if not line:
             continue
 
+        # Rule 1: Failed login detection
         m = re.search(r"Failed\s+login\s+from\s+(\d{1,3}(?:\.\d{1,3}){3})", line, re.IGNORECASE)
         if m:
             ip = m.group(1)
             stats["failed_login_events"] += 1
             failed_counts[ip] = failed_counts.get(ip, 0) + 1
-            if failed_counts[ip] == FAILED_THRESHOLD:
+
+            if failed_counts[ip] == failed_threshold:
+                score = calculate_risk_score(failed_count=failed_counts[ip])
                 alerts.append({
                     "timestamp": _now(),
                     "type": "Brute Force Attempt",
-                    "severity": "High",
+                    "severity": classify_severity(score),
                     "ip": ip,
-                    "details": f"{FAILED_THRESHOLD}+ failed login attempts detected from {ip}."
+                    "details": f"{failed_threshold}+ failed login attempts detected from {ip}.",
+                    "score": score
                 })
             continue
 
+        # Rule 2: Successful login from unusual/public IP
         m2 = re.search(r"Login\s+success\s+from\s+(\d{1,3}(?:\.\d{1,3}){3})", line, re.IGNORECASE)
         if m2:
             ip = m2.group(1)
             stats["successful_login_events"] += 1
             if not ip.startswith(PRIVATE_IP_PREFIXES):
+                unknown_ip_found = True
+                score = calculate_risk_score(unknown_ip=True)
                 alerts.append({
                     "timestamp": _now(),
                     "type": "Unknown IP Access",
-                    "severity": "Medium",
+                    "severity": classify_severity(score),
                     "ip": ip,
-                    "details": f"Successful login from unusual/public IP address: {ip}."
+                    "details": f"Successful login from unusual/public IP address: {ip}.",
+                    "score": score
                 })
             continue
 
+        # Rule 3: Restricted area access
         if "restricted" in line.lower() or "admin panel" in line.lower():
+            restricted_found = True
             stats["restricted_events"] += 1
+            score = calculate_risk_score(restricted=True)
             alerts.append({
                 "timestamp": _now(),
                 "type": "Restricted Area Access",
-                "severity": "Medium",
+                "severity": classify_severity(score),
                 "ip": None,
-                "details": line
+                "details": line,
+                "score": score
             })
 
+    total_score = 0
+    for ip, count in failed_counts.items():
+        if count >= failed_threshold:
+            total_score += calculate_risk_score(failed_count=count)
+    if unknown_ip_found:
+        total_score += 5
+    if restricted_found:
+        total_score += 3
+
+    stats["risk_score"] = total_score
     stats["alerts_generated"] = len(alerts)
     return alerts, stats
